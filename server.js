@@ -1,8 +1,5 @@
 require("dotenv").config();
 
-const fetch = (...args) =>
-  import("node-fetch").then(({ default: fetch }) => fetch(...args));
-
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -36,14 +33,14 @@ function generateCode() {
   return out;
 }
 
-// ✅ Minimal PDF page count (works for most PDFs)
+// ✅ Minimal PDF page count
 function countPdfPages(buffer) {
   const text = buffer.toString("latin1");
   const matches = text.match(/\/Type\s*\/Page\b/g);
   return matches ? matches.length : 1;
 }
 
-// ✅ Create Yoco checkout (Yoco Online API)
+// ✅ Create Yoco checkout (Node 18 native fetch)
 async function createYocoCheckout({ amount_cents, description, successUrl, cancelUrl, metadata }) {
   const resp = await fetch("https://payments.yoco.com/api/checkouts", {
     method: "POST",
@@ -75,23 +72,18 @@ app.get("/", (req, res) => {
   res.send("BiTS Paid Print Server ✅");
 });
 
-/**
- * POST /create-order
- * body:
- *   color_mode: "bw" | "color"
- *   copies: number
- * file: pdf
- */
+// ✅ Create print order
 app.post("/create-order", upload.single("file"), async (req, res) => {
   try {
     const file = req.file;
     const color_mode = (req.body.color_mode || "bw").toLowerCase();
     const copies = Math.max(parseInt(req.body.copies || "1", 10), 1);
 
-    if (!file) return res.status(400).json({ success: false, error: "No file uploaded" });
+    if (!file) {
+      return res.status(400).json({ success: false, error: "No file uploaded" });
+    }
 
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (ext !== ".pdf") {
+    if (path.extname(file.originalname).toLowerCase() !== ".pdf") {
       return res.status(400).json({ success: false, error: "PDF only allowed" });
     }
 
@@ -99,38 +91,33 @@ app.post("/create-order", upload.single("file"), async (req, res) => {
       return res.status(400).json({ success: false, error: "Invalid color_mode" });
     }
 
-    // Count pages
     const pages = countPdfPages(file.buffer);
     const pricePerPage = color_mode === "bw" ? BW_PRICE : COLOR_PRICE;
     const amount_cents = pages * copies * pricePerPage;
 
-    // Generate unique code (retry if collision)
     let code = generateCode();
-    for (let tries = 0; tries < 5; tries++) {
-      const { data: exists } = await supabase
+    for (let i = 0; i < 5; i++) {
+      const { data } = await supabase
         .from("print_orders")
         .select("id")
         .eq("code", code)
         .maybeSingle();
 
-      if (!exists) break;
+      if (!data) break;
       code = generateCode();
     }
 
-    // Upload to Supabase Storage
     const safeName = file.originalname.replace(/[<>:"/\\|?*]+/g, "_");
     const storagePath = `${code}/${Date.now()}_${safeName}`;
 
-    const { error: upErr } = await supabase.storage
+    const { error: uploadErr } = await supabase.storage
       .from(BUCKET)
       .upload(storagePath, file.buffer, {
-        contentType: "application/pdf",
-        upsert: false
+        contentType: "application/pdf"
       });
 
-    if (upErr) throw new Error("Upload failed: " + upErr.message);
+    if (uploadErr) throw uploadErr;
 
-    // Insert DB record
     const { data: order, error: dbErr } = await supabase
       .from("print_orders")
       .insert({
@@ -147,66 +134,53 @@ app.post("/create-order", upload.single("file"), async (req, res) => {
       .select()
       .single();
 
-    if (dbErr) throw new Error("DB insert failed: " + dbErr.message);
-
-    // Create Yoco checkout
-    const successUrl = `https://example.com/success?code=${code}`; // replace later
-    const cancelUrl = `https://example.com/cancel?code=${code}`;   // replace later
+    if (dbErr) throw dbErr;
 
     const checkout = await createYocoCheckout({
       amount_cents,
       description: `BiTS Printing (${color_mode.toUpperCase()}) - Code ${code}`,
-      successUrl,
-      cancelUrl,
+      successUrl: `https://bits-paid-print-server.onrender.com/success?code=${code}`,
+      cancelUrl: `https://bits-paid-print-server.onrender.com/cancel?code=${code}`,
       metadata: { code }
     });
 
-    // Save payment reference (checkout id)
     await supabase
       .from("print_orders")
       .update({ payment_ref: checkout.id })
       .eq("id", order.id);
 
-    return res.json({
+    res.json({
       success: true,
       code,
       pages,
       copies,
-      color_mode,
       amount_cents,
       payUrl: checkout.redirectUrl
     });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-
-// ✅ Yoco webhook (YOU MUST configure webhook URL in Yoco dashboard)
+// ✅ Yoco webhook
 app.post("/webhook/yoco", async (req, res) => {
   try {
-    // NOTE: Real webhook verification depends on Yoco’s webhook signing.
-    // For now we accept event and update using checkout ID.
     const event = req.body;
-
     const checkoutId = event?.payload?.id;
     const status = event?.payload?.status;
 
     if (!checkoutId) return res.status(400).send("No checkout id");
     if (status !== "succeeded") return res.status(200).send("Ignored");
 
-    // Find order by payment_ref = checkoutId
-    const { data: order, error } = await supabase
+    const { data: order } = await supabase
       .from("print_orders")
       .select("*")
       .eq("payment_ref", checkoutId)
       .maybeSingle();
 
-    if (error) throw new Error(error.message);
     if (!order) return res.status(404).send("Order not found");
 
-    // Mark paid
     await supabase
       .from("print_orders")
       .update({
@@ -215,7 +189,7 @@ app.post("/webhook/yoco", async (req, res) => {
       })
       .eq("id", order.id);
 
-    res.status(200).send("OK");
+    res.send("OK");
   } catch (err) {
     console.error(err);
     res.status(500).send("Webhook error");
@@ -223,5 +197,5 @@ app.post("/webhook/yoco", async (req, res) => {
 });
 
 app.listen(process.env.PORT || 8080, "0.0.0.0", () => {
-  console.log("✅ Paid print server running on port", process.env.PORT || 8080);
+  console.log("✅ Paid print server running");
 });
