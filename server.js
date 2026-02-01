@@ -9,111 +9,15 @@ const { createClient } = require("@supabase/supabase-js");
 const app = express();
 
 /* ================================
-   GLOBAL MIDDLEWARE (MUST BE FIRST)
+   GLOBAL MIDDLEWARE
 ================================ */
 app.use(cors());
 app.use(express.json());
 
-/* ================================
-   BOOT LOG
-================================ */
 console.log("🔥 SERVER.JS LOADED");
 
 /* ================================
-   STEP 2 — TEST ROUTES
-================================ */
-app.post("/test", (req, res) => {
-  console.log("✅ /test route hit");
-  res.status(200).json({ ok: true });
-});
-
-app.post("/create-order-test", (req, res) => {
-  console.log("✅ /create-order-test hit");
-  res.status(200).json({ reached: true });
-});
-
-// ==============================
-// STEP 3 – CREATE ORDER (NO PAYMENT)
-// ==============================
-
-app.post("/create-order", upload.single("file"), async (req, res) => {
-  try {
-    console.log("📥 /create-order hit");
-
-    const file = req.file;
-    const color_mode = (req.body.color_mode || "bw").toLowerCase();
-    const copies = Math.max(parseInt(req.body.copies || "1", 10), 1);
-
-    if (!file) {
-      return res.status(400).json({ success: false, error: "No file uploaded" });
-    }
-
-    if (path.extname(file.originalname).toLowerCase() !== ".pdf") {
-      return res.status(400).json({ success: false, error: "Only PDF files allowed" });
-    }
-
-    if (!["bw", "color"].includes(color_mode)) {
-      return res.status(400).json({ success: false, error: "Invalid color_mode" });
-    }
-
-    // Count pages
-    const pages = countPdfPages(file.buffer);
-
-    // Pricing
-    const pricePerPage = color_mode === "bw" ? BW_PRICE : COLOR_PRICE;
-    const amount_cents = pages * copies * pricePerPage;
-
-    // Generate unique code
-    let code = generateCode();
-
-    const safeName = file.originalname.replace(/[<>:"/\\|?*]+/g, "_");
-    const storagePath = `${code}/${Date.now()}_${safeName}`;
-
-    // Upload to Supabase Storage
-    const { error: uploadErr } = await supabase.storage
-      .from(BUCKET)
-      .upload(storagePath, file.buffer, {
-        contentType: "application/pdf"
-      });
-
-    if (uploadErr) throw uploadErr;
-
-    // Insert order
-    const { data: order, error: dbErr } = await supabase
-      .from("print_orders")
-      .insert({
-        code,
-        bucket: BUCKET,
-        file_path: storagePath,
-        file_name: safeName,
-        color_mode,
-        copies,
-        pages,
-        amount_cents,
-        status: "created"
-      })
-      .select()
-      .single();
-
-    if (dbErr) throw dbErr;
-
-    res.json({
-      success: true,
-      code,
-      pages,
-      copies,
-      amount_cents
-    });
-
-  } catch (err) {
-    console.error("❌ create-order error:", err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-
-/* ================================
-   FILE UPLOAD CONFIG
+   FILE UPLOAD CONFIG (MUST BE BEFORE ROUTES)
 ================================ */
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -152,6 +56,84 @@ function countPdfPages(buffer) {
   const matches = text.match(/\/Type\s*\/Page\b/g);
   return matches ? matches.length : 1;
 }
+
+/* ================================
+   STEP 2 — TEST ROUTES
+================================ */
+app.post("/test", (req, res) => {
+  console.log("✅ /test route hit");
+  res.status(200).json({ ok: true });
+});
+
+app.post("/create-order-test", (req, res) => {
+  console.log("✅ /create-order-test hit");
+  res.status(200).json({ reached: true });
+});
+
+/* ================================
+   STEP 3 — CREATE ORDER (NO PAYMENT)
+================================ */
+app.post("/create-order", upload.single("file"), async (req, res) => {
+  try {
+    console.log("📥 /create-order hit");
+
+    const file = req.file;
+    const color_mode = (req.body.color_mode || "bw").toLowerCase();
+    const copies = Math.max(parseInt(req.body.copies || "1", 10), 1);
+
+    if (!file) {
+      return res.status(400).json({ success: false, error: "No file uploaded" });
+    }
+
+    if (path.extname(file.originalname).toLowerCase() !== ".pdf") {
+      return res.status(400).json({ success: false, error: "Only PDF files allowed" });
+    }
+
+    if (!["bw", "color"].includes(color_mode)) {
+      return res.status(400).json({ success: false, error: "Invalid color_mode" });
+    }
+
+    const pages = countPdfPages(file.buffer);
+    const pricePerPage = color_mode === "bw" ? BW_PRICE : COLOR_PRICE;
+    const amount_cents = pages * copies * pricePerPage;
+
+    const code = generateCode();
+    const safeName = file.originalname.replace(/[<>:"/\\|?*]+/g, "_");
+    const storagePath = `${code}/${Date.now()}_${safeName}`;
+
+    const { error: uploadErr } = await supabase.storage
+      .from(BUCKET)
+      .upload(storagePath, file.buffer, {
+        contentType: "application/pdf"
+      });
+
+    if (uploadErr) throw uploadErr;
+
+    await supabase.from("print_orders").insert({
+      code,
+      bucket: BUCKET,
+      file_path: storagePath,
+      file_name: safeName,
+      color_mode,
+      copies,
+      pages,
+      amount_cents,
+      status: "created"
+    });
+
+    res.json({
+      success: true,
+      code,
+      pages,
+      copies,
+      amount_cents
+    });
+
+  } catch (err) {
+    console.error("❌ create-order error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 /* ================================
    HEALTH CHECK
