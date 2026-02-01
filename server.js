@@ -1,5 +1,7 @@
 require("dotenv").config();
 
+console.log("🔥 SERVER.JS LOADED - VERSION 2026-02-01");
+
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -15,8 +17,10 @@ app.use(cors());
    STEP 2 – TEST ROUTES (NO BODY PARSERS)
    ================================ */
 app.post("/test", (req, res) => {
+  console.log("✅ /test route hit");
   res.json({ ok: true });
 });
+
 
 app.post("/create-order-test", (req, res) => {
   res.json({ reached: true });
