@@ -79,6 +79,8 @@ app.get("/", (req, res) => {
 });
 
 
+console.log("🚀 Registering /create-order route");
+
 // ✅ Create print order
 app.post("/create-order", upload.single("file"), async (req, res) => {
   try {
