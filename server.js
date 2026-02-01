@@ -10,26 +10,34 @@ const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
 
-// TEST ROUTE (Step 2)
+/* ================================
+   STEP 2 – TEST ROUTES (NO BODY PARSERS)
+   ================================ */
 app.post("/test", (req, res) => {
   res.json({ ok: true });
 });
 
-
-
-// CREATE ORDER TEST ROUTE
 app.post("/create-order-test", (req, res) => {
   res.json({ reached: true });
 });
 
+/* ================================
+   BODY PARSERS AFTER TEST ROUTES
+   ================================ */
+app.use(express.json());
 
+/* ================================
+   MULTER (FILE UPLOADS)
+   ================================ */
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 } // 20MB
 });
 
+/* ================================
+   SUPABASE
+   ================================ */
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -42,19 +50,31 @@ const COLOR_PRICE = parseInt(process.env.COLOR_PRICE_CENTS || "800", 10);
 function generateCode() {
   const chars = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
   let out = "";
-  for (let i = 0; i < 6; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  for (let i = 0; i < 6; i++) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
   return out;
 }
 
-// ✅ Minimal PDF page count
+/* ================================
+   PDF PAGE COUNT
+   ================================ */
 function countPdfPages(buffer) {
   const text = buffer.toString("latin1");
   const matches = text.match(/\/Type\s*\/Page\b/g);
   return matches ? matches.length : 1;
 }
 
-// ✅ Create Yoco checkout (Node 18 native fetch)
-async function createYocoCheckout({ amount_cents, description, successUrl, cancelUrl, metadata }) {
+/* ================================
+   YOCO CHECKOUT
+   ================================ */
+async function createYocoCheckout({
+  amount_cents,
+  description,
+  successUrl,
+  cancelUrl,
+  metadata
+}) {
   const resp = await fetch("https://payments.yoco.com/api/checkouts", {
     method: "POST",
     headers: {
@@ -80,15 +100,18 @@ async function createYocoCheckout({ amount_cents, description, successUrl, cance
   return data;
 }
 
-// ✅ Health check
+/* ================================
+   HEALTH CHECK
+   ================================ */
 app.get("/", (req, res) => {
   res.send("BiTS Paid Print Server ✅");
 });
 
-
+/* ================================
+   CREATE ORDER (REAL ROUTE)
+   ================================ */
 console.log("🚀 Registering /create-order route");
 
-// ✅ Create print order
 app.post("/create-order", upload.single("file"), async (req, res) => {
   try {
     const file = req.file;
@@ -179,7 +202,9 @@ app.post("/create-order", upload.single("file"), async (req, res) => {
   }
 });
 
-// ✅ Yoco webhook
+/* ================================
+   YOCO WEBHOOK
+   ================================ */
 app.post("/webhook/yoco", async (req, res) => {
   try {
     const event = req.body;
@@ -212,6 +237,9 @@ app.post("/webhook/yoco", async (req, res) => {
   }
 });
 
+/* ================================
+   START SERVER
+   ================================ */
 app.listen(process.env.PORT || 8080, "0.0.0.0", () => {
   console.log("✅ Paid print server running");
 });
