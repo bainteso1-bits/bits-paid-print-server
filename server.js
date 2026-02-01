@@ -12,6 +12,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// TEST ROUTE (Step 2)
+app.post("/test", (req, res) => {
+  res.json({ ok: true });
+});
+
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 } // 20MB
@@ -71,6 +77,7 @@ async function createYocoCheckout({ amount_cents, description, successUrl, cance
 app.get("/", (req, res) => {
   res.send("BiTS Paid Print Server ✅");
 });
+
 
 // ✅ Create print order
 app.post("/create-order", upload.single("file"), async (req, res) => {
