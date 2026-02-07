@@ -6,6 +6,12 @@ const multer = require("multer");
 const path = require("path");
 const { createClient } = require("@supabase/supabase-js");
 
+/* ================================
+   FETCH (SAFE FOR RENDER)
+================================ */
+const fetch = (...args) =>
+  import("node-fetch").then(({ default: fetch }) => fetch(...args));
+
 const app = express();
 
 /* ================================
@@ -17,7 +23,7 @@ app.use(express.json());
 console.log("🔥 SERVER.JS LOADED");
 
 /* ================================
-   FILE UPLOAD CONFIG (MUST BE BEFORE ROUTES)
+   FILE UPLOAD CONFIG
 ================================ */
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -58,20 +64,55 @@ function countPdfPages(buffer) {
 }
 
 /* ================================
+   YOCO CHECKOUT
+================================ */
+async function createYocoCheckout({ amount_cents, description, code }) {
+  const response = await fetch("https://payments.yoco.com/api/checkouts", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.YOCO_SECRET_KEY}`
+    },
+    body: JSON.stringify({
+      amount: amount_cents,
+      currency: "ZAR",
+      description,
+      successUrl: `${process.env.PUBLIC_BASE_URL}/success?code=${code}`,
+      cancelUrl: `${process.env.PUBLIC_BASE_URL}/cancel?code=${code}`,
+      metadata: { code }
+    })
+  });
+
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data?.message || "Failed to create Yoco checkout");
+  }
+
+  return data;
+}
+
+/* ================================
    STEP 2 — TEST ROUTES
 ================================ */
 app.post("/test", (req, res) => {
-  console.log("✅ /test route hit");
-  res.status(200).json({ ok: true });
+  console.log("✅ /test hit");
+  res.json({ ok: true });
 });
 
-app.post("/create-order-test", (req, res) => {
+app.post("/create-order-test", upload.single("file"), (req, res) => {
   console.log("✅ /create-order-test hit");
-  res.status(200).json({ reached: true });
+  console.log("Body:", req.body);
+  console.log("File:", req.file?.originalname);
+
+  res.json({
+    reached: true,
+    hasFile: !!req.file
+  });
 });
 
 /* ================================
-   STEP 3 — CREATE ORDER (NO PAYMENT)
+   STEP 4 — CREATE ORDER + PAYMENT
 ================================ */
 app.post("/create-order", upload.single("file"), async (req, res) => {
   try {
@@ -86,11 +127,7 @@ app.post("/create-order", upload.single("file"), async (req, res) => {
     }
 
     if (path.extname(file.originalname).toLowerCase() !== ".pdf") {
-      return res.status(400).json({ success: false, error: "Only PDF files allowed" });
-    }
-
-    if (!["bw", "color"].includes(color_mode)) {
-      return res.status(400).json({ success: false, error: "Invalid color_mode" });
+      return res.status(400).json({ success: false, error: "Only PDF allowed" });
     }
 
     const pages = countPdfPages(file.buffer);
@@ -109,29 +146,81 @@ app.post("/create-order", upload.single("file"), async (req, res) => {
 
     if (uploadErr) throw uploadErr;
 
-    await supabase.from("print_orders").insert({
-      code,
-      bucket: BUCKET,
-      file_path: storagePath,
-      file_name: safeName,
-      color_mode,
-      copies,
-      pages,
+    const { data: order, error: dbErr } = await supabase
+      .from("print_orders")
+      .insert({
+        code,
+        bucket: BUCKET,
+        file_path: storagePath,
+        file_name: safeName,
+        color_mode,
+        copies,
+        pages,
+        amount_cents,
+        status: "pending_payment"
+      })
+      .select()
+      .single();
+
+    if (dbErr) throw dbErr;
+
+    const checkout = await createYocoCheckout({
       amount_cents,
-      status: "created"
+      description: `BiTS Printing (${color_mode.toUpperCase()}) - ${code}`,
+      code
     });
+
+    await supabase
+      .from("print_orders")
+      .update({ payment_ref: checkout.id })
+      .eq("id", order.id);
 
     res.json({
       success: true,
       code,
       pages,
       copies,
-      amount_cents
+      amount_cents,
+      payUrl: checkout.redirectUrl
     });
 
   } catch (err) {
     console.error("❌ create-order error:", err);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/* ================================
+   YOCO WEBHOOK
+================================ */
+app.post("/webhook/yoco", async (req, res) => {
+  try {
+    const checkoutId = req.body?.payload?.id;
+    const status = req.body?.payload?.status;
+
+    if (!checkoutId) return res.status(400).send("Missing checkout id");
+    if (status !== "succeeded") return res.send("Ignored");
+
+    const { data: order } = await supabase
+      .from("print_orders")
+      .select("*")
+      .eq("payment_ref", checkoutId)
+      .maybeSingle();
+
+    if (!order) return res.status(404).send("Order not found");
+
+    await supabase
+      .from("print_orders")
+      .update({
+        status: "paid",
+        paid_at: new Date().toISOString()
+      })
+      .eq("id", order.id);
+
+    res.send("OK");
+  } catch (err) {
+    console.error("Webhook error:", err);
+    res.status(500).send("Webhook failed");
   }
 });
 
@@ -143,7 +232,7 @@ app.get("/", (req, res) => {
 });
 
 /* ================================
-   START SERVER (RENDER SAFE)
+   START SERVER
 ================================ */
 const PORT = process.env.PORT || 10000;
 
